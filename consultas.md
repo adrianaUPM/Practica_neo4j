@@ -359,42 +359,36 @@ Para usar el parámetro en la interfaz web de Neo4j hemos tenido que ejecutar `:
 ```cypher
 :params {weapon_type: "sword-shield"};
 
-//Para cada ubicación, calculamos la debilidad total de sus monstruos. sum(wk.level) acumula los niveles de debilidad de TODOS los monstruos de esa loc
+//Para cada ubicación y elemento, sumamos los niveles de debilidad
+MATCH (e:Element {kind:'element'})<-[wk:WEAK_TO]-(:Monster)-[:LIVES_IN]->(loc:Location)
+WITH loc.name AS ubicacion, e AS elemento, sum(wk.level) AS deb_total
 
-MATCH (loc:Location)<-[:LIVES_IN]-(:Monster)-[wk:WEAK_TO]->(e:Element)
-WHERE e.kind = 'element'
-WITH loc, e, sum(wk.level) AS deb_elem
+//Agrupamos los elementos por ubicación y ordenamos de mayor a menor debilidad
+WITH ubicacion, collect(elemento) AS elementos, deb_total
+ORDER BY deb_total DESC
 
-//Buscamos armas del tipo dado que hagan daño de ese mismo elemento
-//usamos 'e' directamente como nodo
+// recoge el primer grupo por ubicación
+WITH ubicacion, collect(elementos)[0] AS elementos_max
 
-MATCH (w:Weapon)-[d:DEALS]->(e)
-WHERE w.kind = $weapon_type
+// que hagan daño contra esos elementos
+UNWIND elementos_max AS elemento_max
+MATCH (w:Weapon {kind: $weapon_type})-[d:DEALS]->(elemento_max)
 
-//Calculamos la eficacia parcial de cada arma contra cada elemento
+// Sumamos el daño total del arma contra todos los elementos vulnerables
+WITH ubicacion,
+     [e IN elementos_max | e.name] AS nombres_elementos,
+     w.name AS arma,
+     sum(d.damage) AS daño_total
 
-WITH loc, e.name AS elem_name, deb_elem, w.name AS arma_nombre,
-     d.damage * deb_elem AS eficacia_parcial
+//agrupamos armas por ubicación y ordenamos por daño descendente
+WITH ubicacion, nombres_elementos, daño_total, collect(arma) AS armas
+ORDER BY daño_total DESC
 
-// Agrupamos por ubicación y arma para sumar la eficacia total
-// También recogemos los nombres de elementos en los que esta arma es eficaz
+/Nos quedamos con las armas de mayor daño por ubicación
+WITH ubicacion, nombres_elementos, collect(armas)[0] AS armas_max
 
-WITH loc, arma_nombre,
-     sum(eficacia_parcial) AS eficacia_total,
-     collect(DISTINCT elem_name) AS elems_vulnerables
-
-// Agrupamos por ubicación para encontrar la eficacia máxima
-// max() nos da el valor más alto de eficacia entre todas las armas
-
-WITH loc,
-     collect(elems_vulnerables) AS todos_elems,
-     collect({arma: arma_nombre, ef: eficacia_total}) AS armas_ef,
-     max(eficacia_total) AS max_ef
-
-//Devolvemos el resultado 
-
-RETURN loc.name AS ubicacion,
-       todos_elems[0] AS elementos_vulnerables,
-       [ae IN armas_ef WHERE ae.ef = max_ef | ae.arma] AS armas_recomendadas
-ORDER BY loc.name
+RETURN ubicacion,
+       nombres_elementos AS elementos_vulnerables,
+       armas_max AS armas_recomendadas
+ORDER BY ubicacion
 ```
