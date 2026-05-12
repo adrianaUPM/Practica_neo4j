@@ -323,3 +323,78 @@ RETURN destino.name AS arma,
        nombres_camino AS camino_fabricacion,
        num_monstruos AS monstruos_diferentes
 ```
+
+## 9. Escribe una consulta que devuelva para cada ubicación (Location), el o los elementos (Element) de tipo "element" frente a los que los monstruos que viven allí son más débiles en conjunto (sumando los niveles de debilidad), y devuelve el nombre de la ubicación, el valor total de esa máxima debilidad y los nombres de dichos elementos. 
+
+para cada Location, encontramos todos sus monstruos y sus debilidades a elementos de kind = 'element'. Sumamos los niveles de debilidad por elemento. El elemento o elementos con la suma máxima es el más explotable en esa ubicación.
+
+Usamos un patrón de max por grupo, primero calculamos el máximo global por ubicación con max() y luego filtramos los elementos que lo igualan con list comprehension.
+
+
+```cypher
+MATCH (loc:Location)<-[:LIVES_IN]-(m:Monster)-[w:WEAK_TO]->(e:Element)
+WHERE e.kind = 'element'
+
+WITH loc, e, sum(w.level) AS debilidad_total
+
+WITH loc,
+     collect({elemento: e.name, debilidad: debilidad_total}) AS elems,
+     max(debilidad_total) AS max_deb
+
+WITH loc, max_deb,
+     [ed IN elems WHERE ed.debilidad = max_deb | ed.elemento] AS mas_debiles
+
+RETURN loc.name  AS ubicacion,
+       max_deb     AS debilidad_maxima,
+       mas_debiles AS elementos_mas_debiles
+ORDER BY loc.name;
+```
+
+## 10. Escribe una consulta que, dado un tipo de arma como parámetro, devuelva qué arma deberías llevar a cada localización. Para ello, se seleccionarán las armas del tipo indicado que causen más daño contra los elementos frente a los que, en conjunto, los monstruos de esa localización son más débiles (sumando sus niveles de debilidad). La consulta debe devolver el nombre de la ubicación, los elementos frente a los que los monstruos son más vulnerables y el nombre de las armas recomendadas.
+
+Combinamos la consulta 9 con las armas. Para cada ubicación calculamos los elementos más vulnerables. Para cada arma del tipo indicado, calculamos una "eficacia" = `suma de (daño elemental del arma × debilidad total de ese elemento en la ubicación)`. El arma con mayor eficacia es la recomendada.
+
+Para usar el parámetro en la interfaz web de Neo4j hemos tenido que ejecutar `:params {weapon_type: "Sword"}` antes de lanzar la consulta.
+
+```cypher
+:params {weapon_type: "sword-shield"};
+
+//Para cada ubicación, calculamos la debilidad total de sus monstruos. sum(wk.level) acumula los niveles de debilidad de TODOS los monstruos de esa loc
+
+MATCH (loc:Location)<-[:LIVES_IN]-(:Monster)-[wk:WEAK_TO]->(e:Element)
+WHERE e.kind = 'element'
+WITH loc, e, sum(wk.level) AS deb_elem
+
+//Buscamos armas del tipo dado que hagan daño de ese mismo elemento
+//usamos 'e' directamente como nodo
+
+MATCH (w:Weapon)-[d:DEALS]->(e)
+WHERE w.kind = $weapon_type
+
+//Calculamos la eficacia parcial de cada arma contra cada elemento
+
+WITH loc, e.name AS elem_name, deb_elem, w.name AS arma_nombre,
+     d.damage * deb_elem AS eficacia_parcial
+
+// Agrupamos por ubicación y arma para sumar la eficacia total
+// También recogemos los nombres de elementos en los que esta arma es eficaz
+
+WITH loc, arma_nombre,
+     sum(eficacia_parcial) AS eficacia_total,
+     collect(DISTINCT elem_name) AS elems_vulnerables
+
+// Agrupamos por ubicación para encontrar la eficacia máxima
+// max() nos da el valor más alto de eficacia entre todas las armas
+
+WITH loc,
+     collect(elems_vulnerables) AS todos_elems,
+     collect({arma: arma_nombre, ef: eficacia_total}) AS armas_ef,
+     max(eficacia_total) AS max_ef
+
+//Devolvemos el resultado 
+
+RETURN loc.name AS ubicacion,
+       todos_elems[0] AS elementos_vulnerables,
+       [ae IN armas_ef WHERE ae.ef = max_ef | ae.arma] AS armas_recomendadas
+ORDER BY loc.name
+```
