@@ -118,6 +118,81 @@ RETURN tipo, mejores_armas AS armas, max_damage AS daño_maximo
 ORDER BY max_damage DESC;
 ```
 
+## 5. El proceso necesario para obtener el arma con id 297. Dicha arma no se puede craftear directamente, solo se puede obtener mediante actualización de otras armas. La consulta debe devolver todas las armas intermedias que debo actualizar desde un arma que sí sea crafteable directamente. Para el arma 297, dicho proceso es [297, 296, 295], es decir, se debe empezar creando el arma 295, luego actualizar el arma 295 a la 296 y por último actualizar la 296 a la 297. 
+
+ El arma 297 solo se obtiene por upgrade. La cadena es: craftear un arma base → upgradear a una intermedia → upgradear a 297.
+
+La estructura de relaciones para un upgrade es `(Weapon_A)-[:TRANSFORMS]->(wu:WeaponUpgrade)-[:PRODUCES]->(Weapon_B)`. Debemos navegar este patrón hacia atrás desde el arma 297 hasta encontrar el arma crafteable.
+
+Usamos la sintaxis de quantified path patterns para repetir un patrón entre 1 y N veces.
+
+**consultas auxiliares**
+
+```cypher
+// Ver todas las relaciones del arma 297
+MATCH (w:Weapon {id: 297})-[r]-(n)
+RETURN type(r) AS relacion, labels(n) AS vecino,
+       CASE WHEN startNode(r) = w THEN 'SALIENTE' ELSE 'ENTRANTE' END AS direccion,
+       n.id AS id_vecino
+
+output: "TRANSFORMS"
+["WeaponUpgrade"]
+"ENTRANTE"
+297
+```
+```cypher
+// Ver la cadena completa siguiendo TRANSFORMS
+MATCH path = (origen)-[:TRANSFORMS*1..20]->(w297:Weapon {id: 297})
+RETURN [n IN nodes(path) | {label: labels(n), id: n.id, name: n.name}] AS cadena
+LIMIT 5
+
+output:
+[
+  {
+    name: "Pez arpón helado I",
+    label: ["Weapon"],
+    id: 295
+  },
+  {
+    name: null,
+    label: ["WeaponUpgrade"],
+    id: 296
+  },
+  {
+    name: "Pez arpón helado II",
+    label: ["Weapon"],
+    id: 296
+  },
+  {
+    name: null,
+    label: ["WeaponUpgrade"],
+    id: 297
+  },
+  {
+    name: "Pez arpón congelante",
+    label: ["Weapon"],
+    id: 297
+  }
+]
+```
+```cypher
+MATCH (w297:Weapon {id: 297})
+
+MATCH path = (origen:Weapon)-[:TRANSFORMS*1..20]->(w297)
+WHERE EXISTS { MATCH (:WeaponCraft)-[:PRODUCES]->(origen) }
+  AND ALL(n IN nodes(path) WHERE 
+    'Weapon' IN labels(n) OR 'WeaponUpgrade' IN labels(n)
+  )
+
+WITH path,
+     [n IN nodes(path) WHERE 'Weapon' IN labels(n)] AS armas_en_camino
+ORDER BY length(path)
+LIMIT 1
+
+RETURN [a IN armas_en_camino | a.id]   AS proceso_ids,
+       [a IN armas_en_camino | a.name] AS proceso_nombres
+``` 
+
 
 ## 6. El nombre de los monstruos que tengo que matar para fabricar el arma con id 880. Ten en cuenta que dicha arma no se puede craftear directamente, solo se puede obtener mediante actualización de otras armas. 
 
@@ -185,4 +260,66 @@ WITH item WHERE item IS NOT NULL
 MATCH (m:Monster)-[:DROPS]->(item)
 RETURN DISTINCT m.name AS nombre_monstruo
 ORDER BY m.name
+```
+## 7. El arma con el proceso de fabricación más complejo, es decir, que se necesite pasar por más armas intermedias para llegar a ella desde un arma que es crafteable directamente. Debes devolver, el nombre del arma, el tipo del arma, el nombre de todas las armas por las que debo pasar para llegar a ella y el número de pasos necesarios.
+
+Buscamos el camino de upgrades más largo entre todas las armas. La longitud se mide en número de armas en la cadena (incluyendo el origen crafteable y el arma final). Ordenamos de mayor a menor longitud y tomamos el primero. Si hay empates, podemos devolver todos.
+
+```cypher 
+MATCH path = (origen:Weapon)-[:TRANSFORMS*1..60]->(destino:Weapon)
+WHERE EXISTS { MATCH (:WeaponCraft)-[:PRODUCES]->(origen) }
+  AND EXISTS { MATCH (destino)<-[:TRANSFORMS]-(:WeaponUpgrade) }
+  AND NOT EXISTS { MATCH (destino)-[:TRANSFORMS]->(:WeaponUpgrade) }
+
+WITH destino,
+     [n IN nodes(path) WHERE 'Weapon' IN labels(n)] AS armas_en_camino,
+     length(path) AS longitud
+ORDER BY longitud DESC
+LIMIT 1
+
+RETURN destino.name AS arma_final,
+       destino.kind AS tipo_arma,
+       [a IN armas_en_camino | a.name] AS armas_intermedias,
+       size(armas_en_camino) - 1 AS numero_pasos
+```
+
+## 8. El arma con el proceso de fabricación que requiere matar más monstruos diferentes, puedes obviar los empates. Debes devolver el nombre del arma, el nombre de todas las armas por las que debo pasar para llegar a ella y el número de monstruos que es necesario matar. 
+
+Para cada arma final, recorremos toda su cadena de fabricación. Para cada arma de la cadena, recopilamos sus items necesarios. Para cada item, vemos qué monstruos lo dropean. Contamos monstruos únicos y buscamos el máximo.
+
+Usamos `OPTIONAL MATCH` porque no todos los nodos de la cadena tienen WeaponCraft o WeaponUpgrade directamente ya que los intermedios solo tienen WeaponUpgrade.
+
+```cypher
+MATCH path = (origen:Weapon)-[:TRANSFORMS*1..60]->(destino:Weapon)
+WHERE EXISTS { MATCH (:WeaponCraft)-[:PRODUCES]->(origen) }
+  AND NOT EXISTS { MATCH (destino)-[:TRANSFORMS]->(:WeaponUpgrade) }
+
+WITH destino,
+     [n IN nodes(path) WHERE 'Weapon' IN labels(n)] AS armas_en_camino
+
+UNWIND armas_en_camino AS arma
+
+OPTIONAL MATCH (wc:WeaponCraft)-[:PRODUCES]->(arma)
+OPTIONAL MATCH (wc)-[:NEEDS]->(ic:Item)
+OPTIONAL MATCH (wu:WeaponUpgrade)-[:TRANSFORMS]->(arma)
+OPTIONAL MATCH (wu)-[:NEEDS]->(iu:Item)
+
+WITH destino, armas_en_camino,
+     collect(DISTINCT ic) + collect(DISTINCT iu) AS todos_items
+
+UNWIND todos_items AS item
+WITH destino, armas_en_camino, item
+WHERE item IS NOT NULL
+
+OPTIONAL MATCH (m:Monster)-[:DROPS]->(item)
+
+WITH destino,
+     [a IN armas_en_camino | a.name] AS nombres_camino,
+     count(DISTINCT m) AS num_monstruos
+ORDER BY num_monstruos DESC
+LIMIT 1
+
+RETURN destino.name AS arma,
+       nombres_camino AS camino_fabricacion,
+       num_monstruos AS monstruos_diferentes
 ```
